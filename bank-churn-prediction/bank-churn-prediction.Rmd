@@ -1,0 +1,236 @@
+---
+title: "Bank Customer Churn Prediction"
+author: "Zhaowen Guo"
+date: ""
+output: html_document
+---
+
+In this project, we aim to apply predictive modeling that classifies if a customer is going to churn or not and offer insights on the probability to churn for each customer. See [here](https://www.kaggle.com/code/kmalit/bank-customer-churn-prediction/notebook) for details. 
+
+## Explorary Data Analysis 
+```{r, message=FALSE, warning=FALSE}
+library(psych)
+library(MASS)
+library(kableExtra)
+library(class)
+library(caret)
+library(e1071)
+library(naivebayes)
+library(ggplot2)
+library(GGally)
+library(tidyverse)
+data <- read.csv("Churn_Modeling.csv", stringsAsFactors = F)
+```
+
+This table shows the summary statistics of numeric variables. No missing values exist in this dataset. The boxplots visualize the distribution of numeric variables. 
+```{r}
+# generate summary statistics for numeric variables
+data %>%
+    summarise_all(funs(sum(is.na(.))))
+
+data <- data %>%
+    mutate(HasCrCard = as.factor(HasCrCard),
+           IsActiveMember = as.factor(IsActiveMember),
+           Exited = as.factor(Exited),
+           RowNumber = as.character(RowNumber),
+           CustomerId = as.character(CustomerId)) 
+
+summary.statistics <- data %>%
+    select_if(is.numeric) %>%
+    describe() %>%
+    select(-c(vars,mad,trimmed,median,range,skew,kurtosis))
+
+kable(summary.statistics) %>%
+    kable_styling(latex_options = "scale_down")
+```
+```{r}
+boxplot <- data %>%
+    select_if(is.numeric) %>%
+    pivot_longer(everything())
+
+ggplot(boxplot, aes(x=name, y=value, fill=name)) + 
+    geom_boxplot() + 
+    facet_wrap(facets = ~name, scales = "free") + 
+    theme_bw()
+```
+
+
+Next, we check correlations between variables and find that balance and number of products are relatively highly correlated while the other variables are not correlated. 
+```{r}
+# examine correlations between variables 
+data %>%
+    select_if(is.numeric) %>%
+    cor() %>%
+    kable() %>%
+    kable_styling(latex_options = "scale_down") 
+```
+
+The following visualizations further show the relationships of numeric variables and categorical variables against customer churn. \newline 
+It seems that higher age is associated with higher chances of churn. Among those who churned, there are more female than male, most of them are from Germany or France, they have a credit card, and they are not active customers. 
+
+```{r, message=FALSE}
+histgram.num <- data %>%
+    select(Age, Balance, CreditScore, EstimatedSalary, NumOfProducts, Tenure, Exited) %>%
+    pivot_longer(-Exited)
+
+ggplot(histgram.num, aes(x=value, fill=Exited)) + 
+    geom_histogram() + 
+    facet_wrap(facets = ~name, scales = "free") + 
+    theme_bw()
+```
+
+
+```{r}
+bar.cat <- data %>%
+    select(Geography, Gender, HasCrCard, IsActiveMember, Exited) %>%
+    pivot_longer(-Exited)
+
+ggplot(bar.cat, aes(x=value, fill=Exited)) + 
+    geom_bar() + 
+    facet_wrap(facets = ~name, scales = "free") +
+    theme_bw()
+```
+
+
+
+```{r,warning=FALSE}
+data %>%
+    select_if(is.numeric) %>%
+    ggcorr(lable_size = 2, label = T, size = 2)
+```
+
+
+## Classification Methods 
+
+We first create a training and a test set, which contains 70% and 30% observations, respectively. 
+```{r}
+set.seed(123)
+partition <- createDataPartition(y = data$Exited,
+                                        p=0.7,
+                                        list = F)
+train <- data[partition,]
+test <- data[-partition,]
+
+# create standardized datasets for KNN 
+train.sd <- train %>%
+    select_if(is.numeric) %>%
+    scale()
+test.sd <- test %>%
+    select_if(is.numeric) %>%
+    scale()
+train.y <- data$Exited[partition]
+test.y <- data$Exited[-partition]
+```
+
+
+### Logistic Regression 
+
+In logistic regression, we use the logistic function which is fitted by maximum likelihood estimation. 
+$$
+p(X) = \frac{e^{\beta_0 + \beta_1X}}{1 + e^{\beta_0 + \beta_1X}}
+$$
+We can extract the quantity `p(X)/(1-p(X))` which is called odds, indicating high or low probabilities of customer exit. 
+$$
+\frac{p(X)}{1-p(X)} = e^{\beta_0 + \beta_1X}
+$$
+By taking the logarithm of both sides of the equation above, we have log odds (or logit) which is linear in X. 
+
+```{r}
+m0 <- glm(Exited ~ CreditScore + Gender + Age + Balance + NumOfProducts + IsActiveMember + Geography + Tenure + HasCrCard + EstimatedSalary, data = train, family = "binomial")
+m0s <- step(m0, direction = "backward", trace = F)
+summary(m0s)
+anova(m0s, test = "Chisq")
+```
+
+The model selected by backward selection contains the variables: CreditScore, Gender, Age, Balance, IsActiveMember, Geography, Tenure, and EstimatedSalary. NumOfProducts is not included which confirms the previous observation that NumOfProducts and Balance are correlated and no need to include both. \newline
+Analysis of deviance table tells us a drop in deviance when adding each variable one at a time. We can find that adding Age and IsActiveMember significantly reduces the residual deviance compared to other features. 
+
+```{r}
+m0s.pred <- predict(m0s, test, type = "response")
+m0s.pred.labels <- ifelse(m0s.pred > 0.5, 1, 0) %>%
+    as.factor()
+```
+
+```{r}
+confusionMatrix(m0s.pred.labels, test$Exited)
+(139+472)/2999 # null error rate
+```
+Even though the model's accuracy is 82%, the majority of customers do not churn and the null error rate is just 20% if you always predict "no" exit. 
+
+```{r,warning=FALSE,message=FALSE}
+# report odds ratios 
+exp(cbind(OR = coef(m0s), confint(m0s)))
+```
+
+
+## Naive Bayes
+
+Naive Bayes classifier is based on Bayes theorem but with strong assumptions regarding independence. We assume that predictor variables are conditionally independent upon one another given the response value.
+$$
+P(c|x) = \frac{P(x|c)P(c)}{P(x)}
+$$
+With this, we can simplify the calculation such that the poeterior probability is simply the product of the probability distribution for each individual variable conditioned on the response variable. 
+$$
+P(c_k|x) = \prod_{i=1}^{n}P(x_i|c_k)
+$$
+For categorical variables, we can just use the frequencies from the data. For numeric variables often an assumption of normality is made. The boxplots show that this does not always hold as the boxes are not always symmetrical with mean and median at the center. In this case, we can use Box-Cox transformation or non-parametric Kernel density estimators to get a more accurate representation of these variable probabilities. \newline
+Another issue to consider when using Naive Bayes is that whether there is a feature that never occurs for one or more levels of the response category. A solution is Laplace smoother which adds a small number to each of the counts in the frequencies for each feature. In this case, this is not a concern. 
+
+The prediction accuracy is similar to logistic regression. However, Naive Bayes yields a higher specificity, which means it will more likely get a correct prediction than logistic regression classifier when the customer actually churned. \newline 
+```{r}
+m1 <- naiveBayes(Exited ~ CreditScore + Geography + Gender + Age + Tenure + Balance + HasCrCard + IsActiveMember + EstimatedSalary, data = train)
+m1.pred <- predict(m1, test)
+confusionMatrix(m1.pred, test$Exited)
+```
+
+```{r}
+# set up tuning grid
+nb_grid <- expand.grid(usekernel = c(TRUE, FALSE),
+                       laplace = c(0, 0.5, 1), 
+                    adjust = c(0.75, 1, 1.25, 1.5))
+
+m1.1 <- train(
+    Exited ~ CreditScore + Geography + Gender + Age + Tenure + Balance + HasCrCard + IsActiveMember + EstimatedSalary,
+    data = train,
+    method = "naive_bayes",
+    tuneGrid = nb_grid)
+m1.1.pred <- predict(m1.1, test)
+confusionMatrix(m1.1.pred, test$Exited)
+```
+
+
+## K Nearest Neighbors
+
+KNN is a non-parametric approach as no assumptions are made about the shape of the decision boundary. When there are much larger observations than predictors, KNN will be suitable. 
+
+Different from previous two-step methods where we first fit the model and then use the model to make predictions, KNN uses a single command with the following inputs. 
+
+* A matrix that contains the predictors associated with the training data 
+* A matrix that contains the predictors associated with the test data 
+* A vector that contains class labels for training observations 
+* A value for K (number of nearest neighbors)
+
+Based on the prediction accuracy and prediction specificity, we find the optimal value of k=6. This yields a prediction accuracy of 83% and a prediction specificity of 40%. 
+
+```{r}
+acc <- rep(NA, 10)
+spc <- rep(NA, 10)
+index <- 1:10
+for (i in index) {
+    knn.mod <- knn(train.sd, test.sd, train.y, k=i)
+    acc[i] <- mean(test.y == knn.mod)
+    spc[i] <- length(which((test.y == knn.mod) & (test.y==1)))/length(which(test.y==1))
+}
+kable(cbind(acc,spc,index))
+```
+
+References
+[Naive Bayes](https://uc-r.github.io/naive_bayes)
+
+
+
+
+
+
+
+
